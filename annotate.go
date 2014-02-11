@@ -212,7 +212,7 @@ func (c *Context) WriteText(text string, boundingBox Rectangle) (error, image.Im
 	return c.drawLines(lines, boundingBox, fontSize)
 }
 
-func (c *Context) calculateSize(text string, boundingBox Rectangle, fontSize int32, attempt int32, lastFit int32) (bool, []*Line, int32) {
+func (c *Context) createTextLines(text string, boundingBox Rectangle, fontSize int32) []*Line {
 	hardLines := strings.Split(text, "\n")
 	lardLinesLen := len(hardLines)
 	spaceWidth := c.wordWidth(" ", fontSize)
@@ -235,7 +235,10 @@ func (c *Context) calculateSize(text string, boundingBox Rectangle, fontSize int
 			currLine.currWidth += spaceWidth + wordWidth
 		}
 	}
+	return lines
+}
 
+func (c *Context) calculateTextLineDimentions(boundingBox Rectangle, lines []*Line, fontSize int32) ([]*Line, int32) {
 	totalHeight := int32(0)
 	linesLen := len(lines)
 	for i := 0; i < linesLen; i++ {
@@ -254,6 +257,13 @@ func (c *Context) calculateSize(text string, boundingBox Rectangle, fontSize int
 	}
 	//we add a little buffer zone to the bottom of the text to make sure some runes like "g" don't get cut off
 	totalHeight += int32(c.lineHeight * float64(fontSize))
+
+	return lines, totalHeight
+}
+
+func (c *Context) calculateSize(text string, boundingBox Rectangle, fontSize int32, attempt int32, lastFit int32) (bool, []*Line, int32) {
+	lines := c.createTextLines(text, boundingBox, fontSize)
+	lines, totalHeight := c.calculateTextLineDimentions(boundingBox, lines, fontSize)
 
 	attempt++
 	// if we are trying with the user specified max font size and it fits, return
