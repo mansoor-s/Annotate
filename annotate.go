@@ -30,6 +30,7 @@ import (
 	"code.google.com/p/freetype-go/freetype/truetype"
 	"image"
 	//"image/color"
+	"fmt"
 	"image/draw"
 	"image/jpeg"
 	"image/png"
@@ -75,6 +76,11 @@ type Line struct {
 	BaseToBaseHeight int32
 }
 
+const (
+	LEFT_ALIGNED = iota
+	CENTERED
+)
+
 type Context struct {
 	src            image.Image
 	fontBackground draw.Image // font background
@@ -84,6 +90,8 @@ type Context struct {
 	lineHeight     float64
 	fontColor      image.Image
 	fontSize       int32 //Font size calculated to fit inside of hte bounding box
+	debugEnabled   bool
+	alignment      int
 }
 
 // NewContext returns a pointer to a new instance of Context
@@ -96,6 +104,10 @@ func NewContext() *Context {
 func (c *Context) SetSrc(src image.Image) {
 	c.src = src
 	c.fontBackground = image.NewRGBA(src.Bounds())
+}
+
+func (c *Context) EnableDebugging(enable bool) {
+	c.debugEnabled = enable
 }
 
 // SetSrcPath does same thing as SetSrc, except it will fetch the image, given the path to it.
@@ -190,15 +202,21 @@ func (c *Context) SetFontImage(backgroundImage draw.Image) {
 	draw.Draw(c.fontBackground, c.fontBackground.Bounds(), backgroundImage, image.ZP, 0)
 }
 
-func (c *Context) wordWidth(word string, fontSize int32) int32 {
-	//fUnitsPerEm := c.font.FUnitsPerEm()
+func (c *Context) SetAlignment(alignment int) {
+	c.alignment = alignment
+}
+
+func (c *Context) wordWidth(word string, isFirstWord bool, fontSize int32) int32 {
 	width := int32(0)
 	wordLen := len(word)
 	for i := 0; i < wordLen; i++ {
 		index := c.font.Index(rune(word[i]))
-		//64 = units per pixel
 		hMetric := c.font.HMetric(fontSize, index)
 		width += hMetric.AdvanceWidth
+		if i == 0 && isFirstWord == true {
+			spaceIndex := c.font.Index(rune(' '))
+			width += c.font.Kerning(fontSize, spaceIndex, index)
+		}
 		if i != wordLen-1 {
 			index2 := c.font.Index(rune(word[i+1]))
 			width += c.font.Kerning(fontSize, index, index2)
@@ -208,6 +226,7 @@ func (c *Context) wordWidth(word string, fontSize int32) int32 {
 }
 
 func (c *Context) WriteText(text string, boundingBox Rectangle) (error, image.Image) {
+	fmt.Println("\n\n--------------------------------\n\n")
 	_, lines, fontSize := c.calculateSize(text, boundingBox, c.maxFontSize, -1, 0)
 	return c.drawLines(lines, boundingBox, fontSize)
 }
@@ -215,8 +234,9 @@ func (c *Context) WriteText(text string, boundingBox Rectangle) (error, image.Im
 func (c *Context) createTextLines(text string, boundingBox Rectangle, fontSize int32) []*Line {
 	hardLines := strings.Split(text, "\n")
 	lardLinesLen := len(hardLines)
-	spaceWidth := c.wordWidth(" ", fontSize)
+	spaceWidth := c.wordWidth(" ", false, fontSize)
 	lines := []*Line{}
+	bounds := c.font.Bounds(fontSize)
 	for i := 0; i < lardLinesLen; i++ {
 		hardLine := hardLines[i]
 		words := strings.Split(hardLine, " ")
@@ -226,10 +246,16 @@ func (c *Context) createTextLines(text string, boundingBox Rectangle, fontSize i
 		currLine := lines[len(lines)-1]
 		for j := 0; j < wordsLen; j++ {
 			word := words[j]
-			wordWidth := c.wordWidth(word, fontSize)
-			if (wordWidth + currLine.currWidth + spaceWidth) > (int32(boundingBox.Width)) {
+			wordWidth := int32(0)
+			if j == 0 {
+				wordWidth = c.wordWidth(word, true, fontSize) + int32(float64(bounds.XMin+bounds.XMax)*c.lineHeight)
+			} else {
+				wordWidth = c.wordWidth(word, false, fontSize) + int32(float64(bounds.XMin+bounds.XMax)*c.lineHeight)
+			}
+			if (wordWidth+currLine.currWidth+spaceWidth) >= (int32(boundingBox.Width)) && j != 0 {
 				lines = append(lines, &Line{})
 				currLine = lines[len(lines)-1]
+				wordWidth = c.wordWidth(word, true, fontSize) + int32(float64(bounds.XMin+bounds.XMax)*c.lineHeight)
 			}
 			currLine.Words = append(currLine.Words, word)
 			currLine.currWidth += spaceWidth + wordWidth
@@ -241,11 +267,13 @@ func (c *Context) createTextLines(text string, boundingBox Rectangle, fontSize i
 func (c *Context) calculateTextLineDimentions(boundingBox Rectangle, lines []*Line, fontSize int32) ([]*Line, int32) {
 	totalHeight := int32(0)
 	linesLen := len(lines)
+	bounds := c.font.Bounds(fontSize)
+	boundOneSide := int32(float64(bounds.XMin+bounds.XMax) * c.lineHeight / 2)
 	for i := 0; i < linesLen; i++ {
 		line := lines[i]
 
 		if i == 0 {
-			line.YPos += boundingBox.Y
+			line.YPos += boundingBox.Y + fontSize
 			line.BaseToBaseHeight = fontSize
 		} else {
 			overHeadSpace := int32(c.lineHeight*float64(fontSize)) + fontSize
@@ -253,6 +281,12 @@ func (c *Context) calculateTextLineDimentions(boundingBox Rectangle, lines []*Li
 			line.BaseToBaseHeight = overHeadSpace
 		}
 		line.XPos += boundingBox.X
+		if c.alignment == CENTERED {
+			lineCenter := line.XPos + line.currWidth/2
+			boxCenter := boundingBox.X + boundingBox.Width/2
+			centerDelta := boxCenter - lineCenter
+			line.XPos += centerDelta + boundOneSide
+		}
 		totalHeight += line.BaseToBaseHeight
 	}
 	//we add a little buffer zone to the bottom of the text to make sure some runes like "g" don't get cut off
@@ -303,20 +337,37 @@ func (c *Context) drawLines(lines []*Line, boundingBox Rectangle, fontSize int32
 	imageContext.SetFont(c.font)
 	imageContext.SetDPI(c.dpi)
 
-	rbga := image.NewRGBA(c.src.Bounds())
-	draw.Draw(rbga, rbga.Bounds(), c.src, image.ZP, 0)
+	rgba := image.NewRGBA(c.src.Bounds())
+	draw.Draw(rgba, rgba.Bounds(), c.src, image.ZP, 0)
 
 	imageContext.SetSrc(c.fontColor)
-	imageContext.SetDst(rbga)
+	imageContext.SetDst(rgba)
 	imageContext.SetHinting(freetype.FullHinting)
 	imageContext.SetFontSize(float64(fontSize))
+
+	if c.debugEnabled {
+		debugImage := image.NewUniform(Color{0, 0, 255 << 8, 255 << 8})
+		draw.Draw(rgba, image.Rect(int(boundingBox.X),
+			int(boundingBox.Y),
+			int(boundingBox.X+boundingBox.Width),
+			int(boundingBox.Y+boundingBox.Height)), debugImage, image.ZP, 0)
+	}
 	imageContext.SetClip(c.src.Bounds())
 	for _, line := range lines {
 		words := strings.Join(line.Words, " ")
+		if c.debugEnabled {
+			debugImage2 := image.NewUniform(Color{255 << 8, 0, 0, 255 << 8})
+			draw.Draw(rgba, image.Rect(int(line.XPos),
+				int(line.YPos+int32(float64(fontSize)*c.lineHeight)),
+				int(line.XPos+line.currWidth),
+				int(line.YPos-fontSize)), debugImage2, image.ZP, 0)
+		}
 		_, err := imageContext.DrawString(words, raster.Point{X: raster.Fix32(line.XPos << 8), Y: raster.Fix32((line.YPos) << 8)})
 		if err != nil {
-			return err, rbga
+			return err, rgba
 		}
 	}
-	return nil, rbga
+
+	c.src = rgba
+	return nil, rgba
 }
